@@ -1,12 +1,15 @@
 import requests
 from bs4 import BeautifulSoup
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from requests.exceptions import RequestException
 import random
 from fake_useragent import UserAgent
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Set, Dict, List
 import time
+from extruct.w3cmicrodata import MicrodataExtractor
+from extruct.jsonld import JsonLdExtractor
+import json
 
 def get_random_user_agent():
     """Return a random user agent using fake-useragent library"""
@@ -192,4 +195,120 @@ def extract_meta_info(soup: BeautifulSoup) -> dict:
         elif meta.get('name', '').lower() == 'keywords':
             meta_info['keywords'] = meta.get('content')
     
-    return meta_info 
+    return meta_info
+
+def get_internal_links(soup: BeautifulSoup, base_url: str) -> Set[str]:
+    """Extract all internal links from a page"""
+    internal_links = set()
+    base_domain = urlparse(base_url).netloc
+    
+    for link in soup.find_all('a', href=True):
+        href = link['href']
+        if not href:
+            continue
+            
+        # Make relative URLs absolute
+        if not href.startswith(('http://', 'https://')):
+            href = urljoin(base_url, href)
+            
+        # Check if it's an internal link
+        if urlparse(href).netloc == base_domain:
+            internal_links.add(href)
+            
+    return internal_links
+
+def extract_structured_data(soup: BeautifulSoup, url: str) -> Dict:
+    """Extract structured data (schema.org, JSON-LD, Microdata)"""
+    mde = MicrodataExtractor()
+    jlde = JsonLdExtractor()
+    
+    data = {
+        'products': [],
+        'services': [],
+        'organization': None
+    }
+    
+    # Extract Microdata
+    microdata = mde.extract(soup.prettify(), url)
+    if microdata:
+        for item in microdata:
+            if item.get('type') == 'http://schema.org/Product':
+                data['products'].append(item)
+            elif item.get('type') == 'http://schema.org/Service':
+                data['services'].append(item)
+            elif item.get('type') == 'http://schema.org/Organization':
+                data['organization'] = item
+    
+    # Extract JSON-LD
+    jsonld = jlde.extract(soup.prettify())
+    if jsonld:
+        for item in jsonld:
+            if isinstance(item, dict):
+                if item.get('@type') == 'Product':
+                    data['products'].append(item)
+                elif item.get('@type') == 'Service':
+                    data['services'].append(item)
+                elif item.get('@type') == 'Organization':
+                    data['organization'] = item
+    
+    return data
+
+def crawl_website(url: str, max_pages: int = 10) -> Dict:
+    """Crawl a website and extract information from all pages"""
+    visited_urls = set()
+    to_visit = {url}
+    all_data = {
+        'emails': set(),
+        'products': [],
+        'services': [],
+        'social_media': {},
+        'contact_info': {},
+        'meta_info': {},
+        'pages_checked': []
+    }
+    
+    while to_visit and len(visited_urls) < max_pages:
+        current_url = to_visit.pop()
+        if current_url in visited_urls:
+            continue
+            
+        try:
+            response, _ = make_request(current_url)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Extract information from current page
+            page_data = {
+                'url': current_url,
+                'emails': extract_emails_from_text(response.text) | extract_emails_from_links(soup),
+                'structured_data': extract_structured_data(soup, current_url),
+                'social_media': extract_social_media(soup, current_url),
+                'contact_info': extract_contact_info(soup),
+                'meta_info': extract_meta_info(soup)
+            }
+            
+            # Update all_data with page information
+            all_data['emails'].update(page_data['emails'])
+            all_data['products'].extend(page_data['structured_data']['products'])
+            all_data['services'].extend(page_data['structured_data']['services'])
+            all_data['social_media'].update(page_data['social_media'])
+            all_data['contact_info'].update(page_data['contact_info'])
+            all_data['meta_info'].update(page_data['meta_info'])
+            all_data['pages_checked'].append(current_url)
+            
+            # Get new links to visit
+            new_links = get_internal_links(soup, current_url)
+            to_visit.update(new_links - visited_urls)
+            
+            visited_urls.add(current_url)
+            
+            # Be nice to the server
+            time.sleep(1)
+            
+        except RequestException as e:
+            print(f"Error crawling {current_url}: {str(e)}")
+            continue
+    
+    # Convert sets to lists for JSON serialization
+    all_data['emails'] = list(all_data['emails'])
+    
+    return all_data 

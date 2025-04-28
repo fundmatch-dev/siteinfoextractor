@@ -3,11 +3,12 @@ from langchain.prompts import ChatPromptTemplate
 from langchain.output_parsers import PydanticOutputParser
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import LLMChain
+from langchain.callbacks.base import BaseCallbackHandler
 import json
 import os
 import logging
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Any
 from ..models.data_models import Product, Service, BusinessAnalysis
 
 # Set up logging
@@ -22,16 +23,16 @@ class TokenUsage:
         self.total_cost = 0.0
 
     def add_usage(self, llm_output: Dict):
-        # GPT-3.5 Turbo pricing (as of 2024)
+        # GPT-4.1 pricing (as of 2024)
         PRICING = {
-            "gpt-3.5-turbo": {
-                "input": 0.0005 / 1000,  # $0.0005 per 1K tokens
-                "output": 0.0015 / 1000   # $0.0015 per 1K tokens
+            "gpt-4.1": {
+                "input": 0.03 / 1000,    # $0.03 per 1K tokens
+                "output": 0.06 / 1000     # $0.06 per 1K tokens
             }
         }
         
         token_usage = llm_output["token_usage"]
-        model = "gpt-3.5-turbo"  # We're using gpt-3.5-turbo-16k which has same pricing
+        model = "gpt-4.1"
         
         cost = (token_usage["prompt_tokens"] * PRICING[model]["input"]) + \
                (token_usage["completion_tokens"] * PRICING[model]["output"])
@@ -66,12 +67,19 @@ class TokenUsage:
 # Global token usage tracker
 token_usage = TokenUsage()
 
+# Custom callback handler for token tracking
+class TokenTrackingCallback(BaseCallbackHandler):
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        """Called when LLM finishes running."""
+        if hasattr(response, 'llm_output') and response.llm_output:
+            token_usage.add_usage(response.llm_output)
+
 # Initialize LangChain components
 llm = ChatOpenAI(
-    model_name="gpt-3.5-turbo-16k",
+    model_name="gpt-4.1",
     temperature=0.2,
     openai_api_key=os.getenv("OPENAI_API_KEY"),
-    callbacks=[lambda x: token_usage.add_usage(x.llm_output)]
+    callbacks=[TokenTrackingCallback()]
 )
 
 # LangChain prompts

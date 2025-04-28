@@ -15,7 +15,8 @@ from .scrapers.web_scraper import (
     clean_and_validate_email,
     extract_social_media,
     extract_contact_info,
-    extract_meta_info
+    extract_meta_info,
+    crawl_website
 )
 from .analyzers.ai_analyzer import (
     analyze_product_with_ai,
@@ -40,7 +41,7 @@ class SiteInfoExtractor:
         )
         return structured_data
     
-    def extract_products_and_services(self, soup: BeautifulSoup, url: str, structured_data: dict) -> dict:
+    def extract_products_and_services(self, structured_data: dict) -> dict:
         """Extract products, services, and related information with AI enhancement"""
         products_and_services = {
             'products': [],
@@ -107,55 +108,65 @@ class SiteInfoExtractor:
         website_status = WebsiteStatus()
         
         try:
-            # Make request
-            response, last_modified = make_request(url)
-            website_status.status_code = response.status_code
-            website_status.is_success = True
-            website_status.pages_checked.append({"url": url, "status": response.status_code})
-            website_status.last_modified = last_modified
+            # First, crawl the entire website
+            print(f"\nCrawling website: {url}")
+            crawled_data = crawl_website(url)
+            website_status.pages_checked = crawled_data['pages_checked']
             
-            # Parse HTML
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # Extract structured data from all pages
+            all_structured_data = {
+                'json-ld': [],
+                'microdata': [],
+                'opengraph': [],
+                'microformat': []
+            }
             
-            # Extract structured data
-            structured_data = self.extract_structured_data(response.text, url)
+            for page_url in crawled_data['pages_checked']:
+                try:
+                    response, _ = make_request(page_url)
+                    structured_data = self.extract_structured_data(response.text, page_url)
+                    for key in all_structured_data:
+                        all_structured_data[key].extend(structured_data.get(key, []))
+                except Exception as e:
+                    print(f"Error processing {page_url}: {str(e)}")
+                    continue
             
-            # Extract emails
-            text_emails = extract_emails_from_text(soup.get_text())
-            link_emails = extract_emails_from_links(soup)
-            all_emails = text_emails.union(link_emails)
+            # Aggregate all the data
+            website_status.emails_found = crawled_data['emails']
+            website_status.social_media = crawled_data['social_media']
+            website_status.contact_info = crawled_data['contact_info']
+            website_status.meta_info = crawled_data['meta_info']
             
-            # Clean and validate emails
-            valid_emails = set()
-            for email in all_emails:
-                cleaned_email = clean_and_validate_email(email)
-                if cleaned_email:
-                    valid_emails.add(cleaned_email)
+            # Process products and services from all structured data
+            website_status.products_and_services = self.extract_products_and_services(all_structured_data)
             
-            # Extract additional information
-            website_status.emails_found = list(valid_emails)
-            website_status.social_media = extract_social_media(soup, url)
-            website_status.contact_info = extract_contact_info(soup)
-            website_status.meta_info = extract_meta_info(soup)
-            website_status.products_and_services = self.extract_products_and_services(soup, url, structured_data)
-            
-            # AI-powered business analysis
+            # AI-powered business analysis using all collected data
             try:
+                business_context = {
+                    'emails': website_status.emails_found,
+                    'social_media': website_status.social_media,
+                    'contact_info': website_status.contact_info,
+                    'products': website_status.products_and_services['products'],
+                    'services': website_status.products_and_services['services'],
+                    'categories': website_status.products_and_services['categories']
+                }
+                
                 website_status.business_analysis = analyze_business_with_ai(
-                    soup.get_text(),
-                    structured_data
+                    str(business_context),
+                    all_structured_data
                 ).dict()
                 website_status.business_type = website_status.business_analysis.get('business_type')
             except Exception as e:
                 print(f"Error performing business analysis: {str(e)}")
             
-            # Random delay between requests
-            time.sleep(random.uniform(3, 7))
+            website_status.is_success = True
+            website_status.status_code = 200
             
         except Exception as e:
             website_status.error_message = str(e)
             website_status.is_success = False
-            website_status.pages_checked.append({"url": url, "status": str(e)})
+            if not website_status.pages_checked:
+                website_status.pages_checked.append({"url": url, "status": str(e)})
         
         return website_status
     
@@ -212,5 +223,8 @@ class SiteInfoExtractor:
                 print(f"Business Model: {website_status.business_analysis.get('business_model')}")
             
             results.append(result)
+            
+            # Random delay between websites
+            time.sleep(random.uniform(3, 7))
         
         return pd.DataFrame(results) 
