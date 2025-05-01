@@ -10,6 +10,7 @@ import time
 from extruct.w3cmicrodata import MicrodataExtractor
 from extruct.jsonld import JsonLdExtractor
 import json
+from datetime import datetime
 
 def get_random_user_agent():
     """Return a random user agent using fake-useragent library"""
@@ -253,17 +254,208 @@ def extract_structured_data(soup: BeautifulSoup, url: str) -> Dict:
     
     return data
 
+def extract_business_profile(soup: BeautifulSoup, url: str) -> dict:
+    """Extract business profile information from HTML"""
+    profile = {
+        'primary_category': None,
+        'industry': None,
+        'business_size': None,
+        'years_in_business': None,
+        'main_offerings': [],
+        'price_range': None,
+        'target_segments': [],
+        'sales_model': None,
+        'distribution_channels': [],
+        'service_delivery': [],
+        'locations': [],
+        'service_areas': []
+    }
+    
+    # 1. Extract from structured data (most reliable)
+    structured_data = extract_structured_data(soup, url)
+    if structured_data.get('organization'):
+        org_data = structured_data['organization']
+        if isinstance(org_data, dict):
+            profile['primary_category'] = org_data.get('@type', '').replace('http://schema.org/', '')
+            profile['industry'] = org_data.get('industry')
+            profile['locations'] = [org_data.get('address', {}).get('streetAddress', '')]
+            if org_data.get('foundingDate'):
+                try:
+                    founding_year = int(org_data['foundingDate'][:4])
+                    current_year = datetime.now().year
+                    profile['years_in_business'] = current_year - founding_year
+                except:
+                    pass
+    
+    # 2. Extract from common HTML patterns
+    # Look for about us section
+    about_sections = soup.find_all(['section', 'div'], class_=lambda x: x and any(
+        term in x.lower() for term in ['about', 'company', 'business', 'story']
+    ))
+    
+    for section in about_sections:
+        text = section.get_text().lower()
+        # Look for business size indicators
+        if any(term in text for term in ['small business', 'local business']):
+            profile['business_size'] = 'small'
+        elif any(term in text for term in ['medium', 'mid-sized']):
+            profile['business_size'] = 'medium'
+        elif any(term in text for term in ['large', 'enterprise', 'corporation']):
+            profile['business_size'] = 'large'
+        
+        # Look for years in business
+        year_pattern = r'(\d+)\s+(?:year|yr)s?\s+(?:in business|of experience)'
+        match = re.search(year_pattern, text)
+        if match:
+            profile['years_in_business'] = int(match.group(1))
+    
+    # 3. Extract from navigation and footer
+    nav_links = soup.find_all(['nav', 'footer'])
+    for nav in nav_links:
+        for link in nav.find_all('a'):
+            href = link.get('href', '').lower()
+            text = link.get_text().lower()
+            
+            # Look for service areas
+            if any(term in href for term in ['locations', 'areas', 'regions']):
+                profile['service_areas'].append(text)
+            
+            # Look for distribution channels
+            if any(term in href for term in ['online', 'store', 'shop']):
+                if 'online' in href:
+                    profile['distribution_channels'].append('online')
+                if 'store' in href or 'shop' in href:
+                    profile['distribution_channels'].append('physical')
+    
+    # 4. Extract from product/service pages
+    product_pages = soup.find_all(['section', 'div'], class_=lambda x: x and any(
+        term in x.lower() for term in ['product', 'service', 'offering']
+    ))
+    
+    for page in product_pages:
+        # Look for price range indicators
+        text = page.get_text().lower()
+        if any(term in text for term in ['premium', 'luxury', 'high-end']):
+            profile['price_range'] = 'premium'
+        elif any(term in text for term in ['budget', 'affordable', 'cheap']):
+            profile['price_range'] = 'budget'
+        elif any(term in text for term in ['mid-range', 'standard']):
+            profile['price_range'] = 'mid-range'
+        
+        # Look for sales model indicators
+        if any(term in text for term in ['subscription', 'membership']):
+            profile['sales_model'] = 'subscription'
+        elif any(term in text for term in ['marketplace', 'platform']):
+            profile['sales_model'] = 'marketplace'
+        elif any(term in text for term in ['direct', 'buy now']):
+            profile['sales_model'] = 'direct'
+    
+    # 5. Extract from contact/service pages
+    contact_pages = soup.find_all(['section', 'div'], class_=lambda x: x and any(
+        term in x.lower() for term in ['contact', 'service', 'delivery']
+    ))
+    
+    for page in contact_pages:
+        text = page.get_text().lower()
+        # Look for service delivery methods
+        if any(term in text for term in ['in-person', 'onsite', 'at your location']):
+            profile['service_delivery'].append('in-person')
+        if any(term in text for term in ['remote', 'online', 'virtual']):
+            profile['service_delivery'].append('remote')
+    
+    # Clean up and deduplicate lists
+    profile['distribution_channels'] = list(set(profile['distribution_channels']))
+    profile['service_delivery'] = list(set(profile['service_delivery']))
+    profile['service_areas'] = list(set(profile['service_areas']))
+    
+    return profile
+
+def extract_products_services(soup: BeautifulSoup, url: str) -> List[dict]:
+    """Extract simple product and service information from HTML"""
+    products_services = []
+    
+    # 1. Extract from structured data first
+    structured_data = extract_structured_data(soup, url)
+    for item in structured_data.get('products', []) + structured_data.get('services', []):
+        if isinstance(item, dict):
+            product_service = {
+                'name': item.get('name', ''),
+                'type': 'product' if 'Product' in str(item.get('@type', '')) else 'service',
+                'category': item.get('category'),
+                'price_range': None,
+                'description': item.get('description')
+            }
+            products_services.append(product_service)
+    
+    # 2. Extract from common product/service sections
+    product_sections = soup.find_all(['section', 'div'], class_=lambda x: x and any(
+        term in x.lower() for term in ['product', 'service', 'offering', 'item', 'package']
+    ))
+    
+    for section in product_sections:
+        # Try to find name
+        name_elem = section.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        if not name_elem:
+            continue
+            
+        name = name_elem.get_text().strip()
+        if not name:
+            continue
+            
+        # Determine if it's a product or service
+        section_type = 'service' if any(term in section.get('class', []) for term in ['service', 'offering']) else 'product'
+        
+        # Try to find description
+        description = None
+        desc_elem = section.find(['p', 'div'], class_=lambda x: x and any(
+            term in x.lower() for term in ['description', 'desc', 'details']
+        ))
+        if desc_elem:
+            description = desc_elem.get_text().strip()
+        
+        # Try to find category
+        category = None
+        category_elem = section.find(['span', 'div'], class_=lambda x: x and any(
+            term in x.lower() for term in ['category', 'type', 'class']
+        ))
+        if category_elem:
+            category = category_elem.get_text().strip()
+        
+        # Try to determine price range
+        price_range = None
+        price_text = section.get_text().lower()
+        if any(term in price_text for term in ['premium', 'luxury', 'high-end']):
+            price_range = 'premium'
+        elif any(term in price_text for term in ['budget', 'affordable', 'cheap']):
+            price_range = 'budget'
+        elif any(term in price_text for term in ['mid-range', 'standard']):
+            price_range = 'mid-range'
+        
+        product_service = {
+            'name': name,
+            'type': section_type,
+            'category': category,
+            'price_range': price_range,
+            'description': description
+        }
+        
+        # Only add if we have at least a name
+        if product_service['name']:
+            products_services.append(product_service)
+    
+    return products_services
+
 def crawl_website(url: str, max_pages: int = 10) -> Dict:
     """Crawl a website and extract information from all pages"""
     visited_urls = set()
     to_visit = {url}
     all_data = {
         'emails': set(),
-        'products': [],
-        'services': [],
+        'products_services': [],
         'social_media': {},
         'contact_info': {},
         'meta_info': {},
+        'business_profile': {},
         'pages_checked': []
     }
     
@@ -280,19 +472,20 @@ def crawl_website(url: str, max_pages: int = 10) -> Dict:
             page_data = {
                 'url': current_url,
                 'emails': extract_emails_from_text(response.text) | extract_emails_from_links(soup),
-                'structured_data': extract_structured_data(soup, current_url),
+                'products_services': extract_products_services(soup, current_url),
                 'social_media': extract_social_media(soup, current_url),
                 'contact_info': extract_contact_info(soup),
-                'meta_info': extract_meta_info(soup)
+                'meta_info': extract_meta_info(soup),
+                'business_profile': extract_business_profile(soup, current_url)
             }
             
             # Update all_data with page information
             all_data['emails'].update(page_data['emails'])
-            all_data['products'].extend(page_data['structured_data']['products'])
-            all_data['services'].extend(page_data['structured_data']['services'])
+            all_data['products_services'].extend(page_data['products_services'])
             all_data['social_media'].update(page_data['social_media'])
             all_data['contact_info'].update(page_data['contact_info'])
             all_data['meta_info'].update(page_data['meta_info'])
+            all_data['business_profile'].update(page_data['business_profile'])
             all_data['pages_checked'].append(current_url)
             
             # Get new links to visit

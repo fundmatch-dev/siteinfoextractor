@@ -5,8 +5,9 @@ import random
 from bs4 import BeautifulSoup
 import extruct
 from w3lib.html import get_base_url
+import json
 
-from .models.data_models import WebsiteStatus, Product, Service, BusinessAnalysis
+from .models.data_models import WebsiteStatus, BusinessProfile, BusinessAnalysis, ProductService
 from .utils.setup_validator import load_environment
 from .scrapers.web_scraper import (
     make_request,
@@ -16,12 +17,14 @@ from .scrapers.web_scraper import (
     extract_social_media,
     extract_contact_info,
     extract_meta_info,
+    extract_business_profile,
+    extract_products_services,
     crawl_website
 )
 from .analyzers.ai_analyzer import (
-    analyze_product_with_ai,
-    analyze_service_with_ai,
-    analyze_business_with_ai
+    analyze_business_profile_with_ai,
+    analyze_business_with_ai,
+    analyze_product_service_with_ai
 )
 
 class SiteInfoExtractor:
@@ -41,68 +44,6 @@ class SiteInfoExtractor:
         )
         return structured_data
     
-    def extract_products_and_services(self, structured_data: dict) -> dict:
-        """Extract products, services, and related information with AI enhancement"""
-        products_and_services = {
-            'products': [],
-            'services': [],
-            'categories': set(),
-            'price_ranges': [],
-            'featured_items': []
-        }
-        
-        # Extract from structured data first (most reliable)
-        for data_type, data in structured_data.items():
-            for item in data:
-                if isinstance(item, dict):
-                    # Handle Product schema
-                    if item.get('@type', '').lower() in ['product', 'service']:
-                        product_info = {
-                            'name': item.get('name'),
-                            'description': item.get('description'),
-                            'price': item.get('offers', {}).get('price'),
-                            'category': item.get('category'),
-                            'url': item.get('url'),
-                            'image': item.get('image')
-                        }
-                        if item.get('@type').lower() == 'product':
-                            products_and_services['products'].append(product_info)
-                        else:
-                            products_and_services['services'].append(product_info)
-                    
-                    # Handle category information
-                    if item.get('@type', '').lower() in ['itemlist', 'breadcrumblist']:
-                        for list_item in item.get('itemListElement', []):
-                            if isinstance(list_item, dict):
-                                category = list_item.get('name')
-                                if category:
-                                    products_and_services['categories'].add(category)
-        
-        # Enhance with AI analysis
-        enhanced_products = []
-        for product in products_and_services['products']:
-            try:
-                analyzed_product = analyze_product_with_ai(product)
-                enhanced_products.append(analyzed_product.dict())
-            except Exception as e:
-                print(f"Error analyzing product: {str(e)}")
-                enhanced_products.append(product)
-        
-        enhanced_services = []
-        for service in products_and_services['services']:
-            try:
-                analyzed_service = analyze_service_with_ai(service)
-                enhanced_services.append(analyzed_service.dict())
-            except Exception as e:
-                print(f"Error analyzing service: {str(e)}")
-                enhanced_services.append(service)
-        
-        products_and_services['products'] = enhanced_products
-        products_and_services['services'] = enhanced_services
-        products_and_services['categories'] = list(products_and_services['categories'])
-        
-        return products_and_services
-    
     def process_website(self, url: str) -> WebsiteStatus:
         """Process a single website and extract all available information"""
         website_status = WebsiteStatus()
@@ -113,52 +54,66 @@ class SiteInfoExtractor:
             crawled_data = crawl_website(url)
             website_status.pages_checked = crawled_data['pages_checked']
             
-            # Extract structured data from all pages
-            all_structured_data = {
-                'json-ld': [],
-                'microdata': [],
-                'opengraph': [],
-                'microformat': []
-            }
-            
-            for page_url in crawled_data['pages_checked']:
-                try:
-                    response, _ = make_request(page_url)
-                    structured_data = self.extract_structured_data(response.text, page_url)
-                    for key in all_structured_data:
-                        all_structured_data[key].extend(structured_data.get(key, []))
-                except Exception as e:
-                    print(f"Error processing {page_url}: {str(e)}")
-                    continue
-            
-            # Aggregate all the data
-            website_status.emails_found = crawled_data['emails']
-            website_status.social_media = crawled_data['social_media']
-            website_status.contact_info = crawled_data['contact_info']
-            website_status.meta_info = crawled_data['meta_info']
-            
-            # Process products and services from all structured data
-            website_status.products_and_services = self.extract_products_and_services(all_structured_data)
-            
-            # AI-powered business analysis using all collected data
+            # Extract structured data only from the main page
+            print("Extracting structured data...")
             try:
+                response, _ = make_request(url)
+                structured_data = self.extract_structured_data(response.text, url)
+            except Exception as e:
+                print(f"Error extracting structured data: {str(e)}")
+                structured_data = {
+                    'json-ld': [],
+                    'microdata': [],
+                    'opengraph': [],
+                    'microformat': []
+                }
+            
+            # Extract and process business profile
+            print("Extracting business profile...")
+            business_profile = crawled_data['business_profile']
+            
+            # Process products and services
+            print("Processing products and services...")
+            products_services = crawled_data['products_services']
+            
+            # Combine only essential data for AI analysis
+            print("Performing AI analysis...")
+            try:
+                # Prepare minimal context for AI analysis
                 business_context = {
-                    'emails': website_status.emails_found,
-                    'social_media': website_status.social_media,
-                    'contact_info': website_status.contact_info,
-                    'products': website_status.products_and_services['products'],
-                    'services': website_status.products_and_services['services'],
-                    'categories': website_status.products_and_services['categories']
+                    'profile': {
+                        'name': business_profile.get('name', ''),
+                        'primary_category': business_profile.get('primary_category', ''),
+                        'industry': business_profile.get('industry', ''),
+                        'main_offerings': business_profile.get('main_offerings', [])[:5],  # Limit to top 5
+                        'price_range': business_profile.get('price_range', ''),
+                        'target_segments': business_profile.get('target_segments', [])[:5]  # Limit to top 5
+                    },
+                    'products_services': [{
+                        'name': ps.get('name', ''),
+                        'type': ps.get('type', ''),
+                        'category': ps.get('category', '')
+                    } for ps in products_services[:5]]  # Limit to top 5
                 }
                 
+                # Do single AI analysis for business profile
+                enhanced_profile = analyze_business_profile_with_ai(
+                    business_context['profile'],
+                    json.dumps(business_context)
+                )
+                website_status.business_profile = enhanced_profile
+                
+                # Do single AI analysis for business insights
                 website_status.business_analysis = analyze_business_with_ai(
-                    str(business_context),
-                    all_structured_data
-                ).dict()
-                website_status.business_type = website_status.business_analysis.get('business_type')
+                    json.dumps(business_context),
+                    json.dumps(crawled_data)
+                )
+                
             except Exception as e:
-                print(f"Error performing business analysis: {str(e)}")
+                print(f"Error during AI analysis: {str(e)}")
+                website_status.business_profile = business_profile
             
+            # Update status
             website_status.is_success = True
             website_status.status_code = 200
             
@@ -197,30 +152,25 @@ class SiteInfoExtractor:
                 'address': row['address'],
                 'phone': row['phone_number'],
                 'website': row['website'],
-                'emails': website_status.emails_found,
                 'status_code': website_status.status_code,
                 'error_message': website_status.error_message,
                 'pages_checked': website_status.pages_checked,
-                'social_media': website_status.social_media,
-                'contact_info': website_status.contact_info,
-                'meta_info': website_status.meta_info,
-                'products_and_services': website_status.products_and_services,
-                'business_analysis': website_status.business_analysis,
-                'business_type': website_status.business_type,
+                'business_profile': website_status.business_profile.dict() if website_status.business_profile else None,
+                'business_analysis': website_status.business_analysis.dict() if website_status.business_analysis else None,
                 'last_modified': website_status.last_modified,
                 'crawl_timestamp': website_status.crawl_timestamp
             }
             
             print(f"Status Code: {website_status.status_code}")
             print(f"Pages Checked: {len(website_status.pages_checked)}")
-            print(f"Emails Found: {len(website_status.emails_found)}")
-            print(f"Products Found: {len(website_status.products_and_services['products'])}")
-            print(f"Services Found: {len(website_status.products_and_services['services'])}")
-            print(f"Categories Found: {len(website_status.products_and_services['categories'])}")
+            if website_status.business_profile:
+                print(f"Business Size: {website_status.business_profile.business_size}")
+                print(f"Years in Business: {website_status.business_profile.years_in_business}")
+                print(f"Main Offerings: {len(website_status.business_profile.main_offerings)}")
             if website_status.business_analysis:
-                print(f"Business Type: {website_status.business_type}")
-                print(f"Target Audience: {website_status.business_analysis.get('target_audience')}")
-                print(f"Business Model: {website_status.business_analysis.get('business_model')}")
+                print(f"Business Maturity: {website_status.business_analysis.business_maturity}")
+                print(f"Growth Indicators: {len(website_status.business_analysis.growth_indicators)}")
+                print(f"Outreach Opportunities: {len(website_status.business_analysis.outreach_opportunities)}")
             
             results.append(result)
             
